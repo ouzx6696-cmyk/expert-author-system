@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 from style_deconstructor import StyleDeconstructor
 
 
@@ -8,15 +8,22 @@ class StyleCritic:
 
     def __init__(self, target_style_profile: Dict[str, Any]):
         self.target_stats = target_style_profile["stats"]
+        self.target_profile = target_style_profile.get("profile", {})
         self.deconstructor = StyleDeconstructor()
 
     def get_critic_prompt(self, generated_text: str) -> str:
         """获取风格裁判提示词"""
         target_stats_json = json.dumps(self._simplify_stats(self.target_stats), ensure_ascii=False, indent=2)
+        
+        profile_summary = self._get_profile_summary()
 
         return f"""你是一位严格的风格审查员。你的任务是将【生成文本】与【目标风格指纹】进行对比，并打分。
-目标风格指纹（定量）：
+
+目标风格指纹（定量统计）：
 {target_stats_json}
+
+目标风格特征（定性描述）：
+{profile_summary}
 
 生成文本：
 {generated_text}
@@ -45,12 +52,23 @@ class StyleCritic:
 - 评分要客观严格
 - 给出具体的修改建议，最好能指向问题位置"""
 
+    def _get_profile_summary(self) -> str:
+        """获取定性风格特征的摘要"""
+        summary_parts = []
+        if "author_voice" in self.target_profile:
+            summary_parts.append(f"- 作者声音：{self.target_profile['author_voice']}")
+        if "sentence_rhythm" in self.target_profile:
+            summary_parts.append(f"- 句式节奏：{self.target_profile['sentence_rhythm']}")
+        if "thinking_pattern" in self.target_profile:
+            summary_parts.append(f"- 思维模式：{self.target_profile['thinking_pattern']}")
+        return "\n".join(summary_parts) if summary_parts else "（无定性特征描述）"
+
     def _simplify_stats(self, stats: Dict) -> Dict:
         """简化统计信息用于提示词"""
         return {
-            "avg_sentence_len": stats["syntactic"]["avg_sentence_len"],
-            "short_rate": stats["syntactic"]["short_rate"],
-            "func_ratio": stats["lexical"]["func_ratio"],
+            "avg_sentence_len": float(stats["syntactic"]["avg_sentence_len"]),
+            "short_rate": float(stats["syntactic"]["short_rate"]),
+            "func_ratio": float(stats["lexical"]["func_ratio"]),
             "punct_density": stats["punctuation"]["density_per_kilo"]
         }
 
@@ -63,25 +81,25 @@ class StyleCritic:
         sentence_len_diff = abs(
             generated_stats["syntactic"]["avg_sentence_len"] - target["syntactic"]["avg_sentence_len"]
         )
-        sentence_len_score = max(1, 10 - sentence_len_diff * 0.5)
+        sentence_len_score = max(1.0, min(10.0, 10.0 - sentence_len_diff * 0.5))
 
         short_rate_diff = abs(
             generated_stats["syntactic"]["short_rate"] - target["syntactic"]["short_rate"]
         )
-        short_rate_score = max(1, 10 - short_rate_diff * 0.15)
+        short_rate_score = max(1.0, min(10.0, 10.0 - short_rate_diff * 0.15))
 
         func_ratio_diff = abs(
             generated_stats["lexical"]["func_ratio"] - target["lexical"]["func_ratio"]
         )
-        func_ratio_score = max(1, 10 - func_ratio_diff * 30)
+        func_ratio_score = max(1.0, min(10.0, 10.0 - func_ratio_diff * 30))
 
-        total_score = (sentence_len_score + short_rate_score + func_ratio_score) / 3
+        total_score = (sentence_len_score + short_rate_score + func_ratio_score) / 3.0
 
         return {
-            "sentence_length": sentence_len_score,
-            "short_rate": short_rate_score,
-            "func_ratio": func_ratio_score,
-            "total_score": total_score
+            "sentence_length": float(sentence_len_score),
+            "short_rate": float(short_rate_score),
+            "func_ratio": float(func_ratio_score),
+            "total_score": float(total_score)
         }
 
 
@@ -91,11 +109,17 @@ class WriterAgent:
     def __init__(self, persona_prompt: str):
         self.persona_prompt = persona_prompt
 
-    def get_writer_prompt(self, user_request: str, feedback: Optional[str] = None) -> str:
+    def get_writer_prompt(self, user_request: str, feedback: Optional[str] = None, 
+                         previous_text: Optional[str] = None, scene_type: Optional[str] = None) -> str:
         """获取编剧Agent提示词"""
         prompt = self.persona_prompt + f"\n\n创作任务：{user_request}"
+        
+        if scene_type:
+            prompt += f"\n\n场景类型：{scene_type}（请根据场景类型调整文风）"
 
-        if feedback:
+        if feedback and previous_text:
+            prompt += f"\n\n【上次生成的文本】：\n{previous_text}\n\n【风格裁判反馈】：{feedback}\n\n请根据以上反馈修改文本，保持内容核心不变，但优化风格匹配度。"
+        elif feedback:
             prompt += f"\n\n【风格裁判反馈】：{feedback}\n请根据以上反馈修改文本。"
 
         return prompt
@@ -119,9 +143,18 @@ class PolisherAgent:
 class AuthorPersonaAgent:
     """作家分身Agent - 完整的多Agent协作系统"""
 
-    def __init__(self, style_profile: Dict[str, Any], persona_prompt: str):
+    def __init__(self, style_profile: Dict[str, Any], persona_prompt: str, llm_client: Any = None):
+        """
+        初始化作家分身Agent
+        
+        Args:
+            style_profile: 风格配置文件
+            persona_prompt: 分身提示词
+            llm_client: LLM客户端（可选，用于实际生成）
+        """
         self.style_profile = style_profile
         self.persona_prompt = persona_prompt
+        self.llm_client = llm_client
 
         self.writer = WriterAgent(persona_prompt)
         self.critic = StyleCritic(style_profile)
@@ -130,9 +163,121 @@ class AuthorPersonaAgent:
         self.max_iterations = 3
         self.score_threshold = 7.5
 
-    def generate(self, user_request: str, scene_type: str = None, enable_iteration: bool = True):
+    async def generate_async(self, user_request: str, scene_type: Optional[str] = None, 
+                           enable_iteration: bool = True) -> Dict[str, Any]:
         """
-        完整生成流程
+        完整生成流程（异步版本，需要LLM客户端）
+
+        Args:
+            user_request: 用户创作请求
+            scene_type: 场景类型（可选）
+            enable_iteration: 是否启用迭代优化
+
+        Returns:
+            包含生成结果的字典
+        """
+        if not self.llm_client:
+            raise ValueError("需要设置LLM客户端才能使用生成功能")
+
+        iterations = []
+        current_text = None
+        feedback = None
+        final_score = None
+
+        # 第一次生成
+        writer_prompt = self.writer.get_writer_prompt(user_request, feedback, scene_type=scene_type)
+        
+        try:
+            current_text = await self.llm_client.chat_completion_async(
+                system_prompt="你是一位专业作家。",
+                user_prompt=writer_prompt,
+                temperature=0.8,
+                max_tokens=3000
+            )
+            
+            iterations.append({
+                "iteration": 0,
+                "type": "draft",
+                "text": current_text,
+                "prompt": writer_prompt
+            })
+
+            if enable_iteration:
+                # 迭代循环
+                for i in range(1, self.max_iterations + 1):
+                    # 评估当前文本
+                    quant_eval = self.critic.evaluate_quantitative(current_text)
+                    
+                    # 如果分数达标，停止迭代
+                    if quant_eval["total_score"] >= self.score_threshold:
+                        break
+                    
+                    # 使用LLM进行详细评估
+                    critic_prompt = self.critic.get_critic_prompt(current_text)
+                    try:
+                        critic_result = await self.llm_client.chat_completion_json_async(
+                            system_prompt="你是一位严格的文学风格评审。",
+                            user_prompt=critic_prompt,
+                            temperature=0.3,
+                            max_tokens=1500
+                        )
+                        feedback = critic_result.get("revision_advice", "")
+                        current_score = critic_result.get("total_score", quant_eval["total_score"])
+                    except Exception:
+                        # 如果LLM评估失败，使用本地评估
+                        feedback = f"风格匹配度分数：{quant_eval['total_score']:.1f}/10，请优化风格。"
+                        current_score = quant_eval["total_score"]
+                    
+                    # 根据反馈修改文本
+                    writer_prompt = self.writer.get_writer_prompt(
+                        user_request, feedback, current_text, scene_type
+                    )
+                    
+                    revised_text = await self.llm_client.chat_completion_async(
+                        system_prompt="你是一位专业作家。",
+                        user_prompt=writer_prompt,
+                        temperature=0.7,
+                        max_tokens=3000
+                    )
+                    
+                    iterations.append({
+                        "iteration": i,
+                        "type": "revision",
+                        "text": revised_text,
+                        "score": current_score,
+                        "feedback": feedback,
+                        "prompt": writer_prompt
+                    })
+                    
+                    current_text = revised_text
+
+            # 最终润色
+            polisher_prompt = self.polisher.get_polisher_prompt(current_text)
+            final_text = await self.llm_client.chat_completion_async(
+                system_prompt="你是一位专业的文字编辑。",
+                user_prompt=polisher_prompt,
+                temperature=0.3,
+                max_tokens=3000
+            )
+            
+            # 最终评估
+            final_evaluation = self.critic.evaluate_quantitative(final_text)
+            final_score = final_evaluation["total_score"]
+            
+            return {
+                "final_text": final_text,
+                "iterations": iterations,
+                "final_score": final_score,
+                "final_evaluation": final_evaluation
+            }
+            
+        except Exception as e:
+            raise RuntimeError(f"生成过程出错: {str(e)}")
+
+    def generate(self, user_request: str, scene_type: Optional[str] = None, 
+                enable_iteration: bool = True) -> Dict[str, Any]:
+        """
+        完整生成流程（同步版本，返回框架，实际生成需要使用异步版本）
 
         Args:
             user_request: 用户创作请求
@@ -140,34 +285,18 @@ class AuthorPersonaAgent:
             enable_iteration: 是否启用迭代优化
         """
         iterations = []
-        current_text = None
-        feedback = None
-
-        # 第一次生成
-        writer_prompt = self.writer.get_writer_prompt(user_request, feedback)
+        writer_prompt = self.writer.get_writer_prompt(user_request, scene_type=scene_type)
         iterations.append({
             "iteration": 0,
             "type": "draft",
             "prompt": writer_prompt
         })
 
-        if not enable_iteration:
-            return {
-                "final_text": None,
-                "iterations": iterations,
-                "final_score": None
-            }
-
-        # 迭代循环（模拟，实际需调用LLM API）
-        for i in range(1, self.max_iterations + 1):
-            # 这里需要实际调用LLM生成文本
-            # 为演示，先返回框架
-            pass
-
         return {
             "final_text": None,
             "iterations": iterations,
-            "final_score": None
+            "final_score": None,
+            "message": "请使用 generate_async() 方法进行实际生成，需要提供LLM客户端"
         }
 
     def get_critic_evaluation_prompt(self, generated_text: str) -> str:
@@ -177,3 +306,7 @@ class AuthorPersonaAgent:
     def get_polisher_prompt(self, text: str) -> str:
         """获取润色提示词"""
         return self.polisher.get_polisher_prompt(text)
+    
+    def evaluate_text(self, text: str) -> Dict[str, float]:
+        """评估文本的风格匹配度"""
+        return self.critic.evaluate_quantitative(text)

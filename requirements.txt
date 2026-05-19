@@ -1,6 +1,5 @@
 jieba==0.42.1
 numpy==1.26.4
-pandas==2.2.1
 PyYAML==6.0.1
 openai==1.54.0
 python-dotenv==1.0.1

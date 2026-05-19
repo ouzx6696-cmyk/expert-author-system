@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 
 class StyleCompiler:
@@ -50,11 +50,27 @@ class StyleCompiler:
 - 保持整体节奏
 """
         }
+        
+        # 通用AI味禁忌词列表
+        self.generic_taboos = [
+            "总而言之", "综上所述", "值得注意的是", "由此可见",
+            "也就是说", "我们可以看到", "从这个角度来看",
+            "需要指出的是", "值得一提的是", "必须承认的是"
+        ]
 
     def compile_persona_prompt(self, style_profile: Dict[str, Any], author_name: str = "作家") -> str:
-        """编译主分身提示词"""
+        """
+        编译主分身提示词
+        
+        Args:
+            style_profile: 风格配置文件
+            author_name: 作家名称
+            
+        Returns:
+            编译后的提示词
+        """
         stats = style_profile["stats"]
-        profile = style_profile["profile"]
+        profile = style_profile.get("profile", {})
 
         # 构建统计约束
         stats_constraint = self._build_stats_constraint(stats)
@@ -84,28 +100,37 @@ class StyleCompiler:
 
     def _build_stats_constraint(self, stats: Dict) -> str:
         """构建统计约束部分"""
-        syntactic = stats["syntactic"]
-        lexical = stats["lexical"]
-        punctuation = stats["punctuation"]["density_per_kilo"]
+        try:
+            syntactic = stats["syntactic"]
+            lexical = stats["lexical"]
+            punctuation = stats["punctuation"]["density_per_kilo"]
 
-        # 提取高频功能词
-        func_words_combined = "、".join([
-            w for w, c in lexical["high_freq_words"][:10]
-            if len(w) <= 3
-        ])
+            # 提取高频功能词
+            high_freq_words = lexical.get("high_freq_words", [])
+            func_words_combined = "、".join([
+                w for w, c in high_freq_words[:10]
+                if isinstance(w, str) and len(w) <= 3
+            ]) if high_freq_words else "（无）"
 
-        # 构建标点约束
-        punct_constraints = []
-        for p in ["—", "…", "；"]:
-            if p in punctuation:
-                punct_constraints.append(f"{p} 密度约 {punctuation[p]:.1f} 次/千字")
+            # 构建标点约束
+            punct_constraints = []
+            for p in ["—", "…", "；"]:
+                if p in punctuation:
+                    try:
+                        punct_constraints.append(f"{p} 密度约 {float(punctuation[p]):.1f} 次/千字")
+                    except (ValueError, TypeError):
+                        pass
 
-        constraint_text = f"""- 句子长度：均值 {syntactic['avg_sentence_len']:.1f} 字，短句(<8字)爆发率 {syntactic['short_rate']:.1f}%
-- 词汇丰富度（TTR）：维持在 {lexical['ttr']:.2f} 左右
-- 功能词占比：{lexical['func_ratio']:.2f}，常用词包括 {func_words_combined}
-- 标点偏好：{'；'.join(punct_constraints) if punct_constraints else '保持自然标点使用'}"""
+            constraint_lines = [
+                f"- 句子长度：均值 {float(syntactic['avg_sentence_len']):.1f} 字，短句(<8字)爆发率 {float(syntactic['short_rate']):.1f}%",
+                f"- 词汇丰富度（TTR）：维持在 {float(lexical['ttr']):.2f} 左右",
+                f"- 功能词占比：{float(lexical['func_ratio']):.2f}，常用词包括 {func_words_combined}",
+                f"- 标点偏好：{'；'.join(punct_constraints) if punct_constraints else '保持自然标点使用'}"
+            ]
 
-        return constraint_text
+            return "\n".join(constraint_lines)
+        except Exception as e:
+            return f"- （统计约束构建失败：{str(e)}）"
 
     def _build_narrative_constraint(self, profile: Dict) -> str:
         """构建叙事软约束部分"""
@@ -131,27 +156,34 @@ class StyleCompiler:
         if "rhetoric_devices" in profile:
             rhetorics = profile["rhetoric_devices"]
             if isinstance(rhetorics, list):
-                rhetoric_names = [r.get("name", str(r)) for r in rhetorics[:3]]
-                constraints.append(f"- 常用修辞：{'、'.join(rhetoric_names)}")
+                rhetoric_names = []
+                for r in rhetorics[:3]:
+                    if isinstance(r, dict):
+                        rhetoric_names.append(r.get("name", str(r)))
+                    else:
+                        rhetoric_names.append(str(r))
+                if rhetoric_names:
+                    constraints.append(f"- 常用修辞：{'、'.join(rhetoric_names)}")
+        
+        if "lexical_fingerprint" in profile:
+            fp = profile["lexical_fingerprint"]
+            if isinstance(fp, list):
+                fp_str = "、".join(str(x) for x in fp[:8])
+                constraints.append(f"- 标志性词汇：{fp_str}")
 
-        return "\n".join(constraints)
+        return "\n".join(constraints) if constraints else "- （无叙事约束）"
 
     def _build_taboo_section(self, profile: Dict) -> str:
         """构建禁忌列表"""
         taboos = []
 
         # 通用AI味禁忌
-        generic_taboos = [
-            "总而言之", "综上所述", "值得注意的是", "由此可见",
-            "也就是说", "我们可以看到", "从这个角度来看",
-            "需要指出的是", "值得一提的是", "必须承认的是"
-        ]
-        taboos.extend(generic_taboos)
+        taboos.extend(self.generic_taboos)
 
         # 从profile获取特定禁忌
         if "taboo_phrases" in profile:
             if isinstance(profile["taboo_phrases"], list):
-                taboos.extend(profile["taboo_phrases"])
+                taboos.extend(str(p) for p in profile["taboo_phrases"])
 
         # 去重
         taboos = list(set(taboos))
@@ -164,11 +196,30 @@ class StyleCompiler:
         return taboo_text
 
     def get_scene_enhancement(self, scene_type: str) -> str:
-        """获取场景强化提示词"""
+        """
+        获取场景强化提示词
+        
+        Args:
+            scene_type: 场景类型
+            
+        Returns:
+            场景强化提示词
+        """
         return self.scene_templates.get(scene_type, "")
 
-    def compile_complete_prompt(self, style_profile: Dict, author_name: str, scene_type: str = None) -> str:
-        """编译完整提示词（含场景强化）"""
+    def compile_complete_prompt(self, style_profile: Dict, author_name: str, 
+                               scene_type: Optional[str] = None) -> str:
+        """
+        编译完整提示词（含场景强化）
+        
+        Args:
+            style_profile: 风格配置文件
+            author_name: 作家名称
+            scene_type: 场景类型（可选）
+            
+        Returns:
+            完整提示词
+        """
         base_prompt = self.compile_persona_prompt(style_profile, author_name)
 
         if scene_type and scene_type in self.scene_templates:
@@ -176,3 +227,12 @@ class StyleCompiler:
             return base_prompt + "\n\n" + enhancement
 
         return base_prompt
+        
+    def get_available_scene_types(self) -> List[str]:
+        """
+        获取可用的场景类型列表
+        
+        Returns:
+            场景类型列表
+        """
+        return list(self.scene_templates.keys())
