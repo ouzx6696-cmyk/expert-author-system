@@ -3,7 +3,7 @@ import json
 import jieba
 import numpy as np
 from collections import Counter
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 
 class StyleDeconstructor:
@@ -20,6 +20,9 @@ class StyleDeconstructor:
         """定量通道：计量风格学分析"""
         if not text or len(text.strip()) == 0:
             raise ValueError("输入文本不能为空")
+
+        if not isinstance(text, str):
+            raise TypeError("输入必须是字符串类型")
 
         sentences = self._split_sentences(text)
         words = list(jieba.cut(text))
@@ -39,10 +42,10 @@ class StyleDeconstructor:
         high_freq_words = sorted(word_counts.items(), key=lambda x: -x[1])[:50]
 
         # 句法层分析
-        sentence_lengths = [len(s) for s in sentences]
-        avg_sentence_len = np.mean(sentence_lengths) if sentence_lengths else 0
-        std_sentence_len = np.std(sentence_lengths) if sentence_lengths else 0
-        median_sentence_len = np.median(sentence_lengths) if sentence_lengths else 0
+        sentence_lengths = [len(s) for s in sentences] if sentences else [0]
+        avg_sentence_len = float(np.mean(sentence_lengths)) if sentences else 0.0
+        std_sentence_len = float(np.std(sentence_lengths)) if sentences else 0.0
+        median_sentence_len = float(np.median(sentence_lengths)) if sentences else 0.0
 
         short_sentences = [s for s in sentence_lengths if s < 8]
         long_sentences = [s for s in sentence_lengths if s > 30]
@@ -53,12 +56,12 @@ class StyleDeconstructor:
         punctuation_counts = self._count_punctuation(text)
         total_chars = len(text)
         punct_density = {
-            k: (v / max(total_chars, 1)) * 1000
+            k: float((v / max(total_chars, 1)) * 1000)
             for k, v in punctuation_counts.items()
         }
 
         # 段落层分析
-        avg_paragraph_len = np.mean([len(p) for p in paragraphs]) if paragraphs else 0
+        avg_paragraph_len = float(np.mean([len(p) for p in paragraphs])) if paragraphs else 0.0
         dialogue_count = self._count_dialogue(text)
         dialogue_ratio = dialogue_count / max(len(sentences), 1)
 
@@ -66,9 +69,9 @@ class StyleDeconstructor:
             "lexical": {
                 "total_words": total_words,
                 "unique_words": unique_words,
-                "ttr": ttr,
+                "ttr": float(ttr),
                 "func_word_count": func_word_count,
-                "func_ratio": func_ratio,
+                "func_ratio": float(func_ratio),
                 "high_freq_words": high_freq_words
             },
             "syntactic": {
@@ -76,8 +79,8 @@ class StyleDeconstructor:
                 "avg_sentence_len": avg_sentence_len,
                 "std_sentence_len": std_sentence_len,
                 "median_sentence_len": median_sentence_len,
-                "short_rate": short_rate,
-                "long_rate": long_rate
+                "short_rate": float(short_rate),
+                "long_rate": float(long_rate)
             },
             "punctuation": {
                 "counts": punctuation_counts,
@@ -87,11 +90,11 @@ class StyleDeconstructor:
                 "total_paragraphs": len(paragraphs),
                 "avg_paragraph_len": avg_paragraph_len,
                 "dialogue_count": dialogue_count,
-                "dialogue_ratio": dialogue_ratio
+                "dialogue_ratio": float(dialogue_ratio)
             }
         }
 
-    def _split_sentences(self, text: str) -> list:
+    def _split_sentences(self, text: str) -> List[str]:
         """按中文标点分割句子"""
         separators = r'[。！？!?]'
         sentences = re.split(separators, text)
@@ -158,3 +161,31 @@ class StyleDeconstructor:
                 "source": None
             }
         }
+
+    async def analyze_qualitative(self, text: str, llm_client: Any) -> Dict[str, Any]:
+        """
+        定性分析（需要LLM支持）
+        
+        Args:
+            text: 分析文本
+            llm_client: LLM客户端实例
+            
+        Returns:
+            定性分析结果字典
+        """
+        if not text or len(text.strip()) == 0:
+            raise ValueError("输入文本不能为空")
+            
+        prompt = self.get_qualitative_prompt().format(corpus=text[:10000])
+        system_prompt = "你是一位资深文学风格分析师。"
+        
+        try:
+            result = await llm_client.chat_completion_json(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                temperature=0.3,
+                max_tokens=2000
+            )
+            return result
+        except Exception as e:
+            raise RuntimeError(f"定性分析失败: {str(e)}")
